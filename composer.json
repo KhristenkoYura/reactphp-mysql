@@ -1,5 +1,5 @@
 {
-    "name": "react/mysql",
+    "name": "khr/react-mysql",
     "description": "mysql driver for reactphp.",
     "keywords": ["mysql", "php", "reactphp"],
     "license": "None",
