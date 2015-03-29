@@ -10,6 +10,8 @@ use React\MySQL\Commands\PingCommand;
 use React\MySQL\Commands\QueryCommand;
 use React\MySQL\Commands\QuitCommand;
 use React\Socket\ConnectionException;
+use React\Promise\Deferred;
+use React\Promise\Promise;
 
 class Connection extends EventEmitter
 {
@@ -40,6 +42,9 @@ class Connection extends EventEmitter
 
     private $state = self::STATE_INIT;
 
+    /**
+     * @var Stream
+     */
     private $stream;
 
     private $buffer;
@@ -52,7 +57,7 @@ class Connection extends EventEmitter
     {
         $this->loop       = $loop;
         $resolver         = (new \React\Dns\Resolver\Factory())->createCached('8.8.8.8', $loop);
-        $this->connector  = new Connector($loop, $resolver);;
+        $this->connector  = new Connector($loop, $resolver);
         $this->executor   = new Executor($this);
         $this->options    = $connectOptions + $this->options;
     }
@@ -61,66 +66,61 @@ class Connection extends EventEmitter
      * Do a async query.
      *
      * @param  string                    $sql
-     *                                             @param mixed ...
+     * @param mixed ...
      * @param  callable                  $callback
-     * @return \React\MySQL\Command|NULL
+     * @return Promise
      */
     public function query()
     {
-        $numArgs = func_num_args();
+        $args = func_get_args();
 
-        if ($numArgs === 0) {
+        if (empty($args)) {
             throw new \InvalidArgumentException('Required at least 1 argument');
         }
 
-        $args = func_get_args();
-        $query = new Query(array_shift($args));
 
-        $callback = array_pop($args);
+        $query = new Query(array_shift($args));
 
         $command = new QueryCommand($this);
         $command->setQuery($query);
 
-        if (!is_callable($callback)) {
-            if ($callback != null) {
-                $args[] = $callback;
-            }
+        if (!empty($args)) {
             $query->bindParamsFromArray($args);
-
-            return $this->_doCommand($command);
         }
 
-        $query->bindParamsFromArray($args);
         $this->_doCommand($command);
 
-        $command->on('results', function ($rows, $command) use ($callback) {
-            $callback($command, $this);
+        $deferred = new Deferred();
+
+        $command->on('results', function ($rows, $command) use ($deferred) {
+            $deferred->resolve(new Result($command));
         });
-        $command->on('error', function ($err, $command) use ($callback) {
-            $callback($command, $this);
+        $command->on('error', function ($err, $command) use ($deferred) {
+            $deferred->reject($err);
         });
-        $command->on('success', function ($command) use ($callback) {
-            $callback($command, $this);
+        $command->on('success', function ($command) use ($deferred) {
+            $deferred->resolve(new Result($command));
         });
+
+        return $deferred->promise();
     }
 
-    public function ping($callback)
+    public function ping()
     {
-        if (!is_callable($callback)) {
-            throw new \InvalidArgumentException('Callback is not a valid callable');
-        }
+        $deferred = new Deferred();
         $this->_doCommand(new PingCommand($this))
-            ->on('error', function ($reason) use ($callback) {
-                $callback($reason, $this);
+            ->on('error', function ($reason) use ($deferred) {
+                $deferred->reject($reason);
             })
-            ->on('success', function () use ($callback) {
-                $callback(null, $this);
+            ->on('success', function () use ($deferred) {
+                $deferred->resolve();
             });
+        return $deferred->promise();
     }
 
     public function selectDb($dbname)
     {
-        return $this->query(sprinf('USE `%s`', $dbname));
+        return $this->query(sprintf('USE `%s`', $dbname));
     }
 
     public function listFields()
@@ -242,5 +242,11 @@ class Connection extends EventEmitter
     public function getServerOptions()
     {
         return $this->serverOptions;
+    }
+
+    public function __destruct() {
+        if (!in_array($this->state, [self::STATE_CLOSEING, self::STATE_CLOSED])) {
+            $this->close();
+        }
     }
 }
